@@ -11,6 +11,6 @@ build:
 
 clean:
 	@echo "Clean bootloader"
-	rm -f BUILD_DIR=$(BUILD_DIR)/stage1.bin
-	rm -f BUILD_DIR=$(BUILD_DIR)/stage1_5.bin
-	rm -f BUILD_DIR=$(BUILD_DIR)/stage2.bin
+	rm -f $(BUILD_DIR)/stage1.bin
+	rm -f $(BUILD_DIR)/stage1_5.bin
+	rm -f $(BUILD_DIR)/stage2.bin

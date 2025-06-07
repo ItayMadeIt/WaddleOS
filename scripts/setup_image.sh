@@ -23,15 +23,21 @@ mkdir -p "$(dirname "$IMAGE")"
 # === Create base image ===
 dd if=/dev/zero of="$IMAGE" bs=1M count=$TOTAL_SIZE_MB
 
+# === Create MBR and first partition with parted ===
+parted --script "$IMAGE" \
+  mklabel msdos \
+  mkpart primary fat32 1MiB "$((1 + FAT_SIZE_MB))"MiB \
+  set 1 boot on
+
 # === Write Stage 1 to MBR ===
-dd if="$STAGE1" of="$IMAGE" bs=512 count=1 conv=notrunc
+dd if="$STAGE1" of="$IMAGE" bs=446 count=1 conv=notrunc
 
 # === Write Stage 1.5 (64 KiB max) to sectors 1–127 ===
 dd if="$STAGE1_5" of="$IMAGE" bs=512 seek=1 conv=notrunc
 
 # === Create FAT image ===
 dd if=/dev/zero of="$BOOT_IMAGE" bs=1M count=$FAT_SIZE_MB
-mkfs.vfat "$BOOT_IMAGE"
+mkfs.vfat -F 16 "$BOOT_IMAGE"
 
 # === Mount FAT and copy files ===
 MOUNT_DIR="$(mktemp -d)"
@@ -39,7 +45,6 @@ sudo mount "$BOOT_IMAGE" "$MOUNT_DIR"
 
 # Copy stage2, kernel, etc.
 sudo cp "$OSDIR_DIR/boot_fat/"* "$MOUNT_DIR/"
-
 sync
 sudo umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"

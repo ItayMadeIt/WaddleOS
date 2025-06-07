@@ -17,5 +17,9 @@ build:
 clean: 	
 
 	make -C src/bootloaders clean BUILD_DIR=$(BUILD_DIR)/bootloaders
-	make -C src/kernel clean BUILD_DIR=$(BUILD_DIR)/bootloaders
-	make -C src/libk clean BUILD_DIR=$(BUILD_DIR)/bootloaders
+	make -C src/kernel      clean BUILD_DIR=$(BUILD_DIR)/bootloaders
+	make -C src/libk        clean BUILD_DIR=$(BUILD_DIR)/bootloaders
+	
+	find ./build -type f -name "*.img" -delete
+
+
