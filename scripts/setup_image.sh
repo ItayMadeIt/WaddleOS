@@ -8,7 +8,7 @@ OSDIR_DIR="$(pwd)/osdir"
 BOOTLOADERS_DIR="$BUILD_DIR/bootloaders"
 
 STAGE1="$BOOTLOADERS_DIR/stage1.bin"
-STAGE1_5="$BOOTLOADERS_DIR/stage1_5.bin"
+STAGE2="$BOOTLOADERS_DIR/stage2.bin"
 
 IMAGE="$BUILD_DIR/image/waddle.img"
 BOOT_IMAGE="$BUILD_DIR/image/fat.img"
@@ -32,8 +32,8 @@ parted --script "$IMAGE" \
 # === Write Stage 1 to MBR ===
 dd if="$STAGE1" of="$IMAGE" bs=446 count=1 conv=notrunc
 
-# === Write Stage 1.5 (64 KiB max) to sectors 1–127 ===
-dd if="$STAGE1_5" of="$IMAGE" bs=512 seek=1 conv=notrunc
+# === Write Stage 2 (64 KiB max) to sectors 1–127 ===
+dd if="$STAGE2" of="$IMAGE" bs=512 seek=1 conv=notrunc
 
 # === Create FAT image ===
 dd if=/dev/zero of="$BOOT_IMAGE" bs=1M count=$FAT_SIZE_MB
@@ -43,8 +43,8 @@ mkfs.vfat -F 16 "$BOOT_IMAGE"
 MOUNT_DIR="$(mktemp -d)"
 sudo mount "$BOOT_IMAGE" "$MOUNT_DIR"
 
-# Copy stage2, kernel, etc.
-sudo cp "$OSDIR_DIR/boot_fat/"* "$MOUNT_DIR/"
+# Copy kernel, etc.
+sudo cp -r "$OSDIR_DIR/boot_fat/"* "$MOUNT_DIR/"
 sync
 sudo umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"

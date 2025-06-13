@@ -1,5 +1,8 @@
 [BITS 16]	 ;Tells the assembler that its a 16 bit code
+%ifndef ELF 
 [ORG 0x7C00] ;Origin, tell the assembler start point
+%endif
+
 
 %define PARTITION_START           (0x01BE+0x7C00)
 %define PARTITION_SIZE            (16)
@@ -12,7 +15,9 @@
 ; This file's purpose it so copy ~ 32 KiB worth of sectors between the
 ; MBR and the first partition so the stage 1.5 can run 
 
-Start:
+
+global _start
+_start:
 	; Far jump to force CS:IP
 	JMP 0x0000:0x7C05	
 
@@ -32,20 +37,20 @@ Start:
 ; Scan partitions
 	; Go over 16 byte entries to find a bootable one
 	MOV SI, PARTITION_START
-Start.partition_loop:
+_start.partition_loop:
 	; Get cur partition attributes 
 	MOV AL, [SI]
 
 	; Is bootable
 	AND AL, BOOT_VALUE
-	JNZ Start.boot_partition
+	JNZ _start.boot_partition
 
 	ADD SI, PARTITION_SIZE
 	CMP SI, PARTITION_END
-	JNZ Start.partition_loop
+	JNZ _start.partition_loop
 	CALL Abort
 
-Start.boot_partition:
+_start.boot_partition:
 	MOV WORD [partition_addr], SI
 
 	; Enable extended mode
@@ -77,11 +82,12 @@ Start.boot_partition:
 
 
 ; Prints binary value in CH, destroys: AX, BX, CX
+global PrintBinary
 PrintBinary:
     MOV CL, 8           ; Bit counter
 PrintBinary.loop:
-    shl CH, 1              ; Shift CH left, MSB goes into CF
-    jc PrintBinary.set1    ; If MSB jump to print 1      
+    SHL CH, 1              ; Shift CH left, MSB goes into CF
+    JC PrintBinary.set1    ; If MSB jump to print 1      
 
     MOV AL, '0'            ; Otherwise set to print 0
     JMP PrintBinary.print  ; Jmp to print
@@ -94,6 +100,7 @@ PrintBinary.print:
     RET                    ; Return
 
 
+global PrintCharacter
 PrintCharacter:	                    ;Assume that ASCII value is in register AL
 	MOV AH, 0x0E	                ; One char   
 	MOV BH, 0x00	                ; Page no
@@ -103,7 +110,7 @@ PrintCharacter:	                    ;Assume that ASCII value is in register AL
 	RET		                        ;Return to calling procedure
 
 
-
+global PrintString
 PrintString:	                    ;Procedure to print string on screen
 	                                ;Assume that string starting pointer is in register SI
 
@@ -117,7 +124,7 @@ PrintString.next_character:	        ;Label
 PrintString.exit_function:	        ;End label
 	RET		                            ;Return
 
-
+global Abort
 Abort:
 	MOV SI, abort_str
 	CALL PrintString
