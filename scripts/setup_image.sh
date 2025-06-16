@@ -3,14 +3,14 @@ set -e
 
 # === Config ===
 BUILD_DIR="$(pwd)/build/output"
-BUILD_IMG_DIR="$(pwd)/build/image"
+BUILD_IMG_PATH="$(pwd)/build/image/waddle.img"
 OSDIR_DIR="$(pwd)/osdir"
 BOOTLOADERS_DIR="$BUILD_DIR/bootloaders"
 
 STAGE1="$BOOTLOADERS_DIR/stage1.bin"
 STAGE2="$BOOTLOADERS_DIR/stage2.bin"
 
-IMAGE="$BUILD_DIR/image/waddle.img"
+IMAGE="$BUILD_DIR/image/root.img"
 BOOT_IMAGE="$BUILD_DIR/image/fat.img"
 
 TOTAL_SIZE_MB=64   # Total image size
@@ -55,4 +55,4 @@ dd if="$BOOT_IMAGE" of="$IMAGE" bs=512 seek=2048 conv=notrunc
 
 echo "Image created at: $IMAGE"
 
-cp $IMAGE $BUILD_IMG_DIR
+cp $IMAGE $BUILD_IMG_PATH

@@ -21,6 +21,14 @@ _start:
 	; Far jump to force CS:IP
 	JMP 0x0000:0x7C05	
 
+	; Setup segments
+	XOR AX, AX
+	MOV DS, AX
+	MOV ES, AX
+	MOV FS, AX
+	MOV GS, AX
+	MOV SS, AX
+
 	; Save driver
 	MOV BYTE [driver], DL
 
@@ -29,11 +37,6 @@ _start:
 	MOV SS, AX
 	MOV SP, 0xFFFE  ; Pick a high even offset
 	
-	; Set up extra segments
-	XOR AX, AX
-	MOV ES, AX
-	MOV DS, AX
-
 ; Scan partitions
 	; Go over 16 byte entries to find a bootable one
 	MOV SI, PARTITION_START

@@ -14,27 +14,37 @@
 %define FIRST_SECTOR_SEG           (0xFE0)
 %define SECTOR_SIZE                (512)
 
-%define FAT_TABLE_SEGMENT           (0x1000)
-%define FAT_TABLE_MAX_SIZE          (0x20000)
-%define FAT_TABLE_SECTORS           (FAT_TABLE_MAX_SIZE / SECTOR_SIZE)
-%define FAT_TABLE_END               (FAT_TABLE_SEGMENT + FAT_TABLE_MAX_SIZE/0x10)
+%define FAT_TABLE_SEGMENT          (0x1000)
+%define FAT_TABLE_MAX_SIZE         (0x20000)
+%define FAT_TABLE_SECTORS          (FAT_TABLE_MAX_SIZE / SECTOR_SIZE)
+%define FAT_TABLE_SEG_END          (FAT_TABLE_SEGMENT + FAT_TABLE_MAX_SIZE/0x10)
 
 %define FILENAME_SIZE              (11)
 %define FILENAME_EXT_SIZE          (3)
 %define FILE_ENTRY_SIZE            (32)
 %define FILES_PER_SECTOR           (SECTOR_SIZE / FILE_ENTRY_SIZE)
 
-%define SECTOR_SEG_FILEDATA        (FAT_TABLE_END)
+%define SECTOR_SEG_FILEDATA        (FAT_TABLE_SEG_END)
+%define SECTOR_FILEDATA            (FAT_TABLE_SEG_END * 0x10)
+%define SECTOR_FILEDATA_COPY       (SECTOR_FILEDATA + SECTOR_SIZE)
+%define SECTOR_ELF_HEADER          (SECTOR_FILEDATA_COPY + SECTOR_SIZE)
+
+%define MEMORY_MAP_SEG             (0x6000)
+; Up to 128 KiB for paging setup and long mode 
+%define PROTECTED_MODE_BIN_ADDR    (0x80000) 
 
 
 ; The file's purpose is to understand FAT16 (and maybe others, so it's flexible) and read
 ;  the boot.cfg file, get it's first line, find that file, and copy it
 ;  with only 32KiB of size, 0x8000 bytes. (So 0x7E00 + 0x8000 = 0xFE00, from 0xFE00 is usable memory)
-;Store stage 1.5
+;Store stage 2
 global _start2
 _start2:
 	MOV SI, hello_string                 
 	CALL PrintString	          
+
+	MOV AX, 0
+	MOV GS, AX
 
 	POP DX
 	MOV [driver], DL
@@ -44,29 +54,411 @@ _start2:
 	MOV [boot_start_sector], DX
 
 	CALL EnableA20
-
 	CALL ParseFATPartitionSector
 	CALL ParseFATLinkedTable
 
+	PUSH WORD 0
+	POP DS
+	MOV SI, stage3_bin_path
+	PUSH WORD SECTOR_SEG_FILEDATA
+	POP ES
+	CALL FindFileFromPath
+	MOV SI, DI   ; Get DI from FindFileFromPath
 
+	TEST AX, AX
+	JNE _start2.file_path_failed
+	
+	; BX = Free file data segment
+	MOV BX, SECTOR_SEG_FILEDATA
+	; DS = ES
+	PUSH ES
+	POP DS
+	; ES = PROTECTED MODE ADDR as segment
+	PUSH WORD PROTECTED_MODE_BIN_ADDR/0x10
+	POP ES
+	; DI = 0
+	XOR DI, DI
+	CALL CopyFile
+	
+	
+
+	PUSH WORD 0
+	POP DS
 	MOV SI, kernel_elf_path
 	PUSH WORD SECTOR_SEG_FILEDATA
 	POP ES
 	CALL FindFileFromPath
 
-	TEST AX, AX
-	JNE _start2.file_path_failed
+	PUSH ES
+	PUSH DI
+
+	; Sets GS and FS limitless (4 GiB access)
+	CALL SetupUnrealMode 
+
+	CALL SetupMemoryMap
+
+	POP SI
+	POP DS
+
+
+	; Ensures DS:SI -> ESI	
+	CALL DsSi2ESI
+	MOV EDI, 0x100000
+	MOV EBX, SECTOR_SEG_FILEDATA * 0x10
+	; CALL UnrealCopyFile
+abc:
+	CALL ContinueWithProtectedMode
+
 	
-	MOV BX, ES
-	CALL PrintFile
-
-	JMP $ 		                        ;Infinite loop, hang it here.
-
+_start2.loop:
+	JMP _start2.loop                        ;Infinite loop, hang it here.
 
 _start2.file_path_failed:
 	MOV SI, failed_str
 	CALL PrintString
+	
+	CALL Abort
+
+
+
+
+
+
+DsSi2ESI:
+	PUSH EAX
+
+	AND ESI, 0xFFFF
+	XOR EAX, EAX
+	MOV AX, DS
+	SHL EAX, 4
+	ADD ESI, EAX
+
+	POP  EAX
+	RET
+
+
+SetupMemoryMap:
+	PUSH ES
+	PUSH DI
+	PUSH EAX
+	PUSH ECX
+	PUSH EDX
+	PUSH EBX
+	
+	XOR EBX, EBX          ; EBX = 0
+
+	PUSH WORD MEMORY_MAP_SEG
+	POP ES                ; ES = MEMORY_MAP_SEG
+	XOR DI, DI            ; DI = 0
+
+SetupMemoryMap.loop:
+
+	MOV EAX, 0xE820       ; Function (load memory map)
+	MOV ECX, 24           ; Size entry
+	MOV EDX, 0x534D4150   ; "SMAP" magic constant
+
+	CLC
+	INT 0x15	
+
+SetupMemoryMap.loop_after_int:
+	; Advance to next 24 byte entry
+	MOV CX, 24
+	ADD DI, CX
+
+	; If carry, stop
+	JC SetupMemoryMap.null_entry
+
+	TEST EBX, EBX
+	JNZ SetupMemoryMap.loop
+
+SetupMemoryMap.null_entry:	
+	MOV ECX, 24           ; Size entry
+	REP STOSB
+
+SetupMemoryMap.done:
+	POP EBX
+	POP EDX
+	POP ECX
+	POP EAX
+	POP DI
+	POP ES
+	RET
+	
+
+ContinueWithProtectedMode:
+	XOR BX, BX
+	MOV DS, BX
+	MOV ES, BX
+	MOV GS, BX
+	MOV FS, BX
+	
+	CLI
+	; Load protected mode gdt
+	LGDT GS:[protected_gdt_info]
+
+	; Enable protected mode (bit 0 in CR0)
+	MOV EAX, CR0
+	OR  EAX, 1
+	MOV CR0, EAX
+	
+	; CS = 0x8 (new code segment)
+	JMP DWORD 0x8:ContinueWithProtectedMode.protected_mode
+
+ContinueWithProtectedMode.protected_mode:
+	
+[BITS 32]
+	; Select second data segment (2 * 8 = 0x10)
+	MOV BX, 0x10     
+	MOV DS, BX
+	MOV ES, BX
+	MOV FS, BX
+	MOV GS, BX
+
+	; Setup SS:SP -> ESP
+	XOR EAX, EAX
+	MOV AX, SS
+	SHL EAX, 4
+	ADD ESP, EAX
+
+	MOV SS, BX
+
+	STI
+
+	; Now setup argument regs and jump to PROTECTED_MODE_BIN_ADDR
+	MOV EBX, MEMORY_MAP_SEG * 0x10
+	CALL PROTECTED_MODE_BIN_ADDR
+
+	; Should never return
 	JMP $
+
+
+
+
+
+
+
+
+
+[BITS 16]
+
+
+
+
+; BX - Usable memory sector
+; ES:DI - Destination address
+; DS:SI - Entry start
+CopyFile:
+	PUSH ECX
+	PUSH AX
+	PUSH DX
+
+	MOV ECX, DS:[SI + 0x1C]   ; ECX = size
+	MOV DX , DS:[SI + 0x1A]   ; Load first cluster address
+
+CopyFile.loop:
+	; AX = FAT_DATA + DX * 2
+	CALL SetClusterStartSector
+
+	CMP ECX, GS:[bytes_per_cluster]
+	JB CopyFile.final_chunk
+
+	PUSH ECX
+	MOV ECX, GS:[bytes_per_cluster]
+	CALL CopyFileCluster
+	POP ECX
+
+	SUB ECX, GS:[bytes_per_cluster]
+
+	; DX(index) = FAT_LINKED_LIST[DX*2]
+	MOV AX, DX
+	CALL NextClusterIndex
+	MOV DX, AX
+
+	; Invalid file (shouldn't get here)
+	CMP AX, 0xFFF8
+	JAE Abort
+
+	JMP CopyFile.loop
+
+
+CopyFile.final_chunk:
+	TEST ECX, ECX
+	JZ CopyFile.done
+
+	CALL CopyFileCluster
+
+CopyFile.done:
+	POP DX
+	POP AX
+	POP ECX
+	RET
+
+
+; Inputs:
+;  ES:DI - Place to copy into
+;  ECX - Amount of bytes need to be copied
+;  AX  - Start sector 
+;  BX  - Memory segment sector 
+; 
+; Notes:
+;  ES:DI & DS:SI move forward min(ECX, bytes_per_cluster)
+;
+CopyFileCluster:
+	PUSH BX
+
+	MOV DS, BX
+
+CopyFileCluster.loop:
+	XOR SI, SI
+
+	PUSH AX      ; Sector start low 2 byte
+	PUSH WORD 0  ; Sector start high 2 byte
+	PUSH BX      ; Segment
+	PUSH WORD 0  ; Offset
+	PUSH WORD 1  ; 1 Sector
+	CALL LoadSector
+	ADD SP, 10
+
+	CMP ECX, SECTOR_SIZE
+	JB CopyFileCluster.last_chunk
+
+	PUSH ECX
+	PUSH SI
+	PUSH DS
+	MOV ECX, SECTOR_SIZE
+	CALL CopyFileSector
+	POP DS
+	POP SI
+	POP ECX
+
+	SUB ECX, SECTOR_SIZE
+
+	INC AX
+
+	JMP CopyFileCluster.loop
+
+CopyFileCluster.last_chunk:
+	TEST ECX, ECX
+	JZ CopyFileCluster.done
+
+	CALL CopyFileSector
+
+CopyFileCluster.done:
+	POP BX
+	RET
+
+
+;
+; Inputs:
+;  DS:SI - Place to copy from 
+;  ES:DI - Place to copy into
+;  ECX - Amount of bytes need to be copied
+CopyFileSector:
+	PUSH AX
+
+CopyFileSector.loop:
+	MOV AL, DS:[SI]
+	MOV ES:[DI], AL
+	
+	INC SI
+	INC DI
+	JNZ CopyFileSector.skip_seg_bump
+	
+	MOV AX, ES
+	ADD AX, 0x100
+	MOV ES, AX
+	
+CopyFileSector.skip_seg_bump:
+	
+	DEC ECX	
+	JNZ CopyFileSector.loop
+
+CopyFileSector.end:
+	POP AX
+	RET
+
+
+SetupUnrealMode:
+	PUSH SS
+	PUSH DS
+	PUSH EAX
+	PUSH EBX
+	
+	XOR BX, BX
+	MOV DS, BX
+	MOV FS, BX
+
+	CLI         ; No interrupts
+	PUSH FS
+
+	LGDT GS:[unreal_gdt_info]     ; Load GDT register
+
+	; Enable protected mode (bit 0 in CR0)
+	MOV EAX, CR0
+	OR  EAX, 1
+	MOV CR0, EAX
+
+	; CS = 0x8 (new code segment)
+	JMP 0x8:SetupUnrealMode.protected_mode
+
+SetupUnrealMode.protected_mode:
+	
+	; Select second data segment (2 * 8 = 0x10)
+	MOV BX, 0x10     
+	MOV GS, BX
+	MOV FS, BX
+
+	; Disable protected mode (bit 0 in CR0)
+	AND AL, 0xFE
+	MOV CR0, EAX
+	
+	JMP 0x0:SetupUnrealMode.unreal_mode
+SetupUnrealMode.unreal_mode:
+	POP FS
+	STI
+
+
+SetupUnrealMode.done:
+	POP EBX
+	POP EAX
+	POP DS
+	POP SS
+	RET
+
+
+
+
+align 8
+unreal_gdt_begin:      dd 0,0        ; entry 0 is always unused
+; BASE = 0, LIMIT = 0xFFFFF, kernel DPL, executable, page granularity, DB 16 bit protected.
+unreal_gdt_flatcode:   db 0xff, 0xff, 0, 0, 0, 10011010b, 10001111b, 0
+; BASE = 0, LIMIT = 0xFFFFF, kernel DPL, read-write, page granularity, DB 32 bit protected.
+unreal_gdt_flatdata:   db 0xff, 0xff, 0, 0, 0, 10010010b, 11001111b, 0
+unreal_gdt_end:
+
+
+unreal_gdt_info:
+   dw unreal_gdt_end - unreal_gdt_begin - 1   ; last byte in table
+   dd unreal_gdt_begin                        ; start of table
+
+
+
+align 8
+protected_gdt_begin: align 8 
+	dq 0        ; entry 0 is always unused
+; BASE = 0, LIMIT = 0xFFFFF, kernel DPL, executable, page granularity, DB 32 bit protected.
+protected_gdt_flatcode: 
+	dq 0x00CF9A000000FFFF
+; BASE = 0, LIMIT = 0xFFFFF, kernel DPL, read-write, page granularity, DB 32 bit protected.
+protected_gdt_flatdata: 
+	dq  0x00CF92000000FFFF
+protected_gdt_end:
+
+
+protected_gdt_info:
+   dw protected_gdt_end - protected_gdt_begin - 1   ; last byte in table
+   dd protected_gdt_begin                        ; start of table
+
 
 
 PrintDebugAX: ; really dummy debug function
@@ -182,30 +574,54 @@ PrintAmountCharacter.loop:
 
 global FindFileFromPath
 ; ES - Usable memory segment (1 sector)
-; SI - String start of the full path
+; DS:SI - String start of the full path
 FindFileFromPath:
 	
 	; Gets root dir "a/b/c" -> "a            " in dummy_filename
+	PUSH DS
+	PUSH WORD 0
+	POP DS
 	CALL ConsumeSubdirSegment
+	POP DS
 
+
+	PUSH DS
 	PUSH SI   ; Save SI
+
+	PUSH WORD 0
+	POP DS
+
 	MOV SI, dummy_filename	
+	
 	CALL FindFileInRoot
 	POP SI    ; Restore SI
+	POP DS
 
 	CMP AX, 0
 	JNZ FindFileFromPath.failed
 
 FindFileFromPath.subdir_loop:
 	; Gets root dir "a/b/c" -> "a            " in dummy_filename
+	PUSH DS
+	PUSH WORD 0
+	POP DS
 	CALL ConsumeSubdirSegment
+	POP DS
 
+	PUSH DS
 	PUSH SI   ; Save SI
+
+	PUSH WORD 0
+	POP DS
+
 	MOV SI, dummy_filename	
-	MOV BX, ES
+	MOV BX, ES               ; Segment to be used is the one in use currently for destination
 	CALL FindFileFromDirSector
-	POP SI    ; Restore SI
 	
+	POP SI    ; Restore SI
+	POP DS
+
+
 	CMP AX, 0
 	JNZ FindFileFromPath.failed
 
@@ -241,9 +657,9 @@ global FindFileInRoot
 FindFileInRoot:
 	PUSH CX
 
-	MOV AX, [root_dir_start]
+	MOV AX, GS:[root_dir_start]
 
-	MOV CX, [max_root_entries]
+	MOV CX, GS:[max_root_entries]
 	
 	CALL IterateDirectorySectors
 
@@ -306,9 +722,9 @@ SetClusterStartSector:
     PUSH DX
     SUB DX, 2
     MOV AX, DX
-    MOV BX, [sectors_per_cluster]
+    MOV BX, GS:[sectors_per_cluster]
     MUL BX
-    ADD AX, [data_region_start]
+    ADD AX, GS:[data_region_start]
 	POP DX
     POP BX
     RET
@@ -563,7 +979,7 @@ ParseFATPartitionSector:
 ParseFATPartitionSector.load:
 
 	; Load first sector from the active partition
-	MOV BX, [boot_start_sector]
+	MOV BX, GS:[boot_start_sector]
 
 	; partition sector index
 	PUSH BX      ; low  2 bytes sector
@@ -584,13 +1000,16 @@ ParseFATPartitionSector.parse:
 	; sectors_per_cluster (1 byte)
 	MOV AL, ES:[0x0D]       
 	MOVZX AX, AL
-	MOV DS:[sectors_per_cluster], AX
+	MOV GS:[sectors_per_cluster], AX
+	MOV BX, SECTOR_SIZE
+	MUL BX
+	MOV GS:[bytes_per_cluster], AX
 
 	; reserved_sectors
 	MOV AX, ES:[0x0E]  
 	MOV BX, AX
-	ADD AX, DS:[boot_start_sector]
-	MOV DS:[fat_start_sector], AX
+	ADD AX, GS:[boot_start_sector]
+	MOV GS:[fat_start_sector], AX
 	
 	; num_fats
 	MOV AL, ES:[0x10]     
@@ -600,26 +1019,26 @@ ParseFATPartitionSector.parse:
 	MOV AX, ES:[0x16]    ; sectors_per_fat 
 	MUL CX                 ; AX = num_fats * sectors_per_fat
 	ADD AX, BX             ; AX = root_dir_start
-	ADD AX, DS:[boot_start_sector]
-	MOV DS:[root_dir_start], AX
+	ADD AX, GS:[boot_start_sector]
+	MOV GS:[root_dir_start], AX
 
 	; max_root_entries
 	MOV CX, ES:[0x11]    ; CX = total root dir amount
-	MOV DS:[max_root_entries], CX
+	MOV GS:[max_root_entries], CX
 	MOV AX, 32
 	MUL CX                 ; AX = 32 * CX = size in bytes  
 	MOV CX, ES:[0x0B]    ; bytes per sector
 	XOR DX, DX
 	DIV CX                 ; AX = root_dir_sectors
-	ADD AX, DS:[root_dir_start]
-	MOV DS:[data_region_start], AX
+	ADD AX, GS:[root_dir_start]
+	MOV GS:[data_region_start], AX
 
 	; max_dir_entries_per_cluster
 	XOR DX, DX
-	MOV AX, DS:[sectors_per_cluster]
+	MOV AX, GS:[sectors_per_cluster]
 	MOV BX, FILES_PER_SECTOR
 	MUL BX
-	MOV DS:[max_dir_entries_per_cluster], AX
+	MOV GS:[max_dir_entries_per_cluster], AX
 
 	RET
 
@@ -640,29 +1059,29 @@ LoadSector:
 	PUSH BX
 	PUSH CX
 	PUSH DX
-	
+
 	; Sectors amount
-	MOV CX, [BP + 0x04]
-	MOV [disk_addr_packet + DISK_SECTORS_AMOUNT_OFFSET], CL
+	MOV CX, SS:[BP + 0x04]
+	MOV GS:[disk_addr_packet + DISK_SECTORS_AMOUNT_OFFSET], CL
 
 	; segement:offset 
-	MOV AX, [BP + 0x06] ; Offset
-	MOV [disk_addr_packet + DISK_LOAD_ADDR_OFFSET], AX
-	MOV AX, [BP + 0x08] ; Segment
-	MOV [disk_addr_packet + DISK_LOAD_SEG_OFFSET], AX
+	MOV AX, SS:[BP + 0x06] ; Offset
+	MOV GS:[disk_addr_packet + DISK_LOAD_ADDR_OFFSET], AX
+	MOV AX, SS:[BP + 0x08] ; Segment
+	MOV GS:[disk_addr_packet + DISK_LOAD_SEG_OFFSET], AX
 
 	; LBA 4 byte sector entry
-    MOV DX, [BP + 0x0A] ; LBA high
-    MOV AX, [BP + 0x0C] ; LBA low
+    MOV DX, SS:[BP + 0x0A] ; LBA high
+    MOV AX, SS:[BP + 0x0C] ; LBA low
 
 LoadSector.loop:
 	CMP CX, 127
 	JB LoadSector.last_chunk
 
 	; Load 127 sectors
-	MOV BYTE [disk_addr_packet + DISK_SECTORS_AMOUNT_OFFSET], 127
-    MOV [disk_addr_packet + DISK_SECTOR_LBA_OFFSET], AX
-    MOV [disk_addr_packet + DISK_SECTOR_LBA_OFFSET + 2], DX
+	MOV BYTE GS:[disk_addr_packet + DISK_SECTORS_AMOUNT_OFFSET], 127
+    MOV GS:[disk_addr_packet + DISK_SECTOR_LBA_OFFSET], AX
+    MOV GS:[disk_addr_packet + DISK_SECTOR_LBA_OFFSET + 2], DX
     CALL CallDiskRead
 
 	; Update LBA += 127
@@ -674,17 +1093,17 @@ LoadSector.loop:
 
 LoadSector.update_mem_addr:
 	; Update memory address: offset += 127 * 512 = 0xFE00
-    MOV BX, [disk_addr_packet + DISK_LOAD_ADDR_OFFSET]
+    MOV BX, GS:[disk_addr_packet + DISK_LOAD_ADDR_OFFSET]
 	ADD BX, 0xFE00
 	JNC LoadSector.no_segment_bump
 
-	MOV BX, [disk_addr_packet + DISK_LOAD_SEG_OFFSET]
+	MOV BX, GS:[disk_addr_packet + DISK_LOAD_SEG_OFFSET]
 	ADD BX, 0xFE0
-	MOV [disk_addr_packet + DISK_LOAD_SEG_OFFSET], BX
+	MOV GS:[disk_addr_packet + DISK_LOAD_SEG_OFFSET], BX
 	JMP LoadSector.after_bump
 
 LoadSector.no_segment_bump:
-	MOV [disk_addr_packet + DISK_LOAD_ADDR_OFFSET], BX
+	MOV GS:[disk_addr_packet + DISK_LOAD_ADDR_OFFSET], BX
 
 LoadSector.after_bump:
 
@@ -694,9 +1113,9 @@ LoadSector.last_chunk:
     CMP CX, 0
     JE LoadSector.done
 
-    MOV [disk_addr_packet + DISK_SECTORS_AMOUNT_OFFSET], CL
-    MOV [disk_addr_packet + DISK_SECTOR_LBA_OFFSET], AX
-    MOV [disk_addr_packet + DISK_SECTOR_LBA_OFFSET + 2], DX
+    MOV GS:[disk_addr_packet + DISK_SECTORS_AMOUNT_OFFSET], CL
+    MOV GS:[disk_addr_packet + DISK_SECTOR_LBA_OFFSET], AX
+    MOV GS:[disk_addr_packet + DISK_SECTOR_LBA_OFFSET + 2], DX
     CALL CallDiskRead
 
 LoadSector.done:
@@ -714,13 +1133,18 @@ CallDiskRead:
     PUSH AX
     PUSH DX
     PUSH SI
+	PUSH DS
+
+	XOR AX, AX
+	MOV DS, AX
 
     MOV AH, 0x42
     MOV SI, disk_addr_packet
-    MOV DL, [driver]
+    MOV DL, GS:[driver]
     INT 0x13
 
-    POP SI
+    POP DS
+	POP SI
     POP DX
     POP AX
     RET
@@ -733,13 +1157,13 @@ EnableA20.test:
 	XOR AX, AX
 	MOV DS, AX
 	MOV SI, 0x7DFE
-	MOV BX, [SI]
+	MOV BX, DS:[SI]
 
 	; Read 0xFFFF:7E0E
 	MOV AX, 0xFFFF    ; AX = 0xFFFF
 	MOV DS, AX
 	MOV SI, 0x7E0E
-	CMP BX, [SI]
+	CMP BX, DS:[SI]
 	
 	PUSH WORD 0
 	POP DS
@@ -776,8 +1200,28 @@ EnableA20.after0:
 	JMP EnableA20.test
 
 EnableA20.enable1:
-	IN AL,0xee
+	; Wait for input buffer to clear
+.wait_input:
+	IN AL, 0x64
+	TEST AL, 2
+	JNZ .wait_input
+
+	; Send command to write output port
+	MOV AL, 0xD1
+	OUT 0x64, AL
+
+	; Wait again
+.wait_input2:
+	IN AL, 0x64
+	TEST AL, 2
+	JNZ .wait_input2
+
+	; Write value with A20 enabled (bit 1 set)
+	MOV AL, 0xDF    ; Common: 1101 1111
+	OUT 0x60, AL
+
 	JMP EnableA20.test
+
 
 global PrintBinary
 ; Prints binary value in CH
@@ -825,7 +1269,7 @@ StrCmpSize.loop:
     CMP CX, 0
     JE StrCmpSize.equal
 
-    LODSB              ; AL ← [DS:SI], SI++
+    LODSB              ; AL <- [DS:SI], SI++
     SCASB              ; compare AL to [ES:DI], DI++
     JNZ StrCmpSize.diff
 
@@ -862,7 +1306,7 @@ PrintCharacter:	                    ;Assume that ASCII value is in register AL
 
 	INT 0x10	                    ;Call video interrupt
 
-PrintCharacter.end
+PrintCharacter.end:
 	POP BX
 	POP AX
 	
@@ -892,6 +1336,8 @@ global Abort
 Abort:
 	MOV SI, abort_str
 	CALL PrintString
+	JMP $
+
 ;Data
 hello_string db 'Hello from stage 2', 0x0A, 0xD, 0  ;HelloWorld string ending with 0
 driver: DB 0
@@ -902,6 +1348,7 @@ disk_addr_packet:
 	DW 0,0,0,0         ; Empty 8 bytes for the LBA address 
 
 kernel_elf_path db 'BOOT/HATCH/KERNEL.ELF', 0 
+stage3_bin_path db 'BOOT/HATCH/STAGE3.BIN', 0 
 
 dummy_filename db FILENAME_SIZE DUP (0x20), 0
  
@@ -909,6 +1356,7 @@ dummy_filename db FILENAME_SIZE DUP (0x20), 0
 ; Currently only support FAT:
 boot_start_sector: dw 0
 sectors_per_cluster: dw 0
+bytes_per_cluster: dd 0
 fat_start_sector: dw 0
 root_dir_start: dw 0
 data_region_start: dw 0
