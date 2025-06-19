@@ -47,15 +47,22 @@ _start2:
 	MOV GS, AX
 
 	POP DX
-	MOV [driver], DL
+	MOV GS:[driver], DL
 	POP SI
-	MOV [partition_addr], SI
-	MOV DX, [SI+0x08]    ; Load bytes at offset 0x08 (LBA start)
-	MOV [boot_start_sector], DX
+	MOV GS:[partition_addr], SI
+	MOV DX, DS:[SI+0x08]    ; Load bytes at offset 0x08 (LBA start)
+	MOV GS:[boot_start_sector], DX
 
 	CALL EnableA20
 	CALL ParseFATPartitionSector
 	CALL ParseFATLinkedTable
+
+
+	; Sets GS and FS limitless (4 GiB access)
+	CALL SetupUnrealMode 
+
+	CALL SetupMemoryMap
+
 
 	PUSH WORD 0
 	POP DS
@@ -67,19 +74,20 @@ _start2:
 
 	TEST AX, AX
 	JNE _start2.file_path_failed
+
 	
-	; BX = Free file data segment
-	MOV BX, SECTOR_SEG_FILEDATA
 	; DS = ES
 	PUSH ES
 	POP DS
-	; ES = PROTECTED MODE ADDR as segment
-	PUSH WORD PROTECTED_MODE_BIN_ADDR/0x10
-	POP ES
-	; DI = 0
-	XOR DI, DI
-	CALL CopyFile
-	
+	; SI = DI
+	PUSH DI
+	POP SI
+	; Ensures DS:SI -> ESI	
+	CALL DsSi2ESI
+	MOV EDI, 0x80000
+	MOV BX, SECTOR_SEG_FILEDATA 
+
+	CALL CopyElfFile
 	
 
 	PUSH WORD 0
@@ -89,24 +97,20 @@ _start2:
 	POP ES
 	CALL FindFileFromPath
 
+	; DS = ES
 	PUSH ES
-	PUSH DI
-
-	; Sets GS and FS limitless (4 GiB access)
-	CALL SetupUnrealMode 
-
-	CALL SetupMemoryMap
-
-	POP SI
 	POP DS
-
+	; SI = DI
+	PUSH DI
+	POP SI
 
 	; Ensures DS:SI -> ESI	
 	CALL DsSi2ESI
 	MOV EDI, 0x100000
-	MOV EBX, SECTOR_SEG_FILEDATA * 0x10
-	; CALL UnrealCopyFile
-abc:
+	MOV BX, SECTOR_SEG_FILEDATA 
+	CALL CopyElfFile
+
+
 	CALL ContinueWithProtectedMode
 
 	
@@ -119,7 +123,502 @@ _start2.file_path_failed:
 	
 	CALL Abort
 
+;
+; ESI - Entry offset
+; BX  - Sector for filedata
+; AX  - 0 succeeded, 1 failure
+CopyElfFile:
+	PUSH ECX
+	PUSH DX
+	
+	MOV ECX, FS:[ESI + 0x1C]   ; ECX = size
+	MOV DX , FS:[ESI + 0x1A]   ; Load first cluster address
 
+CopyElfFile.parse_header:
+
+	; Gets ESI as entry offset, copies 32 byte
+	CALL ParseElfHeader
+
+	MOV AX, 0
+	MOV WORD GS:[elf_entry_index], AX
+
+CopyElfFile.entry_loop:
+	CALL FetchEntryMetadata
+
+	CALL CopyElfEntry
+
+	DEC WORD GS:[elf_entry_amount]
+	JZ CopyElfFile.done
+
+	INC WORD GS:[elf_entry_index]
+
+	JMP CopyElfFile.entry_loop
+	
+CopyElfFile.done:
+
+	POP DX
+	POP ECX
+	RET
+
+; BX - Usable sector
+; DX - File first cluster index
+; All other arguments are global vars:
+;  - elf_entry_size
+;  - elf_entry_index
+;  - elf_ph_offset
+;  - elf_ph_entry
+CopyElfEntry:
+	PUSH ESI
+	PUSH EAX
+
+	; Check if it's load
+	CMP DWORD GS:[elf_ph_entry], 1
+	JNZ CopyElfEntry.done ; not load, done
+
+	CMP BYTE GS:[elf_is_32bit], 1
+	JNE CopyElfEntry.bit64
+
+CopyElfEntry.bit32:
+	MOV ECX, GS:[elf_ph_entry + 0x10] ; filesz
+
+	; PUSH EAX, EAX will be memsz - filesz (amount of zeros) 
+	MOV EAX, GS:[elf_ph_entry + 0x14] ; memsz
+	SUB EAX, ECX
+	PUSH EAX
+
+	MOV EAX, GS:[elf_ph_entry + 0x04] ; offset
+	MOV EDI, GS:[elf_ph_entry + 0x08] ; vaddr
+	
+	JMP CopyElfEntry.copy
+
+CopyElfEntry.bit64:
+	MOV ECX, GS:[elf_ph_entry + 0x20] ; filesz
+	
+	; PUSH EAX, EAX will be memsz - filesz (amount of zeros) 
+	MOV EAX, GS:[elf_ph_entry + 0x28] ; memsz
+	SUB EAX, ECX
+	PUSH EAX
+
+	MOV EAX, GS:[elf_ph_entry + 0x08] ; offset
+	MOV EDI, GS:[elf_ph_entry + 0x10] ; vaddr
+
+CopyElfEntry.copy:
+
+	CALL CopyFileSection
+
+	POP EAX
+
+	TEST EAX, EAX
+	JZ CopyElfEntry.done
+
+CopyElfEntry.loop0:
+	
+	MOV BYTE [EDI], 0
+	INC EDI
+
+	DEC EAX
+	JNZ CopyElfEntry.loop0
+
+CopyElfEntry.done:
+	POP EAX
+	POP ESI
+	RET
+
+; DX - Start sector of elf file
+; BX - Usable segment of memory (512 bytes)
+ParseElfHeader:
+	PUSH ESI
+	PUSH EDI
+	PUSH EAX
+	PUSH ECX
+	PUSH ES
+	PUSH DS
+
+	PUSH GS
+	POP DS
+
+	PUSH GS
+	POP ES
+
+	; AX = DATA + DX * 2
+	CALL SetClusterStartSector
+
+	; Load sector
+	PUSH AX      ; Sector start low 2 byte
+	PUSH WORD 0  ; Sector start high 2 byte
+	PUSH BX      ; Segment
+	PUSH WORD 0  ; Offset
+	PUSH WORD 1  ; 1 Sector
+	CALL LoadSector
+	ADD SP, 10
+
+	; ESI = BX << 4
+	MOV SI, BX
+	AND ESI, 0x0000FFFF
+	SHL ESI, 4
+
+ParseElfHeader.magic:
+	; 0x7F ELF
+	CMP WORD FS:[ESI + 0x00], 0x457F
+	JNE Abort
+	CMP WORD FS:[ESI + 0x02], 0x464C
+	JNE Abort
+
+ParseElfHeader.parse_bit:
+	CMP BYTE FS:[ESI + 0x04], 0x02 ; [SI + 0x04] EI_CLASS
+	JE ParseElfHeader.bit64
+
+ParseElfHeader.bit32:
+	MOV BYTE GS:[elf_is_32bit], 1
+
+	MOV EAX, FS:[ESI + 0x1C]
+	MOV GS:[elf_ph_offset], EAX
+
+	MOV AX, FS:[ESI + 0x2A]
+	MOV GS:[elf_entry_size], AX
+
+	MOV AX, FS:[ESI + 0x2C] 
+	MOV GS:[elf_entry_amount], AX
+
+	JMP ParseElfHeader.done
+ParseElfHeader.bit64:
+	MOV BYTE GS:[elf_is_32bit], 0
+
+	MOV EAX, FS:[ESI + 0x20]
+	MOV GS:[elf_ph_offset], EAX
+
+	MOV AX, FS:[ESI + 0x36]
+	MOV GS:[elf_entry_size], AX
+
+	MOV AX, FS:[ESI + 0x38] 
+	MOV GS:[elf_entry_amount], AX
+
+ParseElfHeader.done:
+	POP DS
+	POP ES
+	POP ECX
+	POP EAX
+	POP EDI
+	POP ESI
+	RET
+
+
+; DX - First cluster address (SAVED)
+; BX - Segment for sector
+FetchEntryMetadata:
+	PUSH DX
+	PUSH BX
+	PUSH EDI
+
+	PUSH DX
+	PUSH BX
+
+	MOV BX, GS:[elf_entry_index] ; Index into the program header table
+	MOV AX, GS:[elf_entry_size]  ; Size of each entry
+	MUL BX ; entry_index * entry_size -> DX:AX 
+
+	; Reconstruct EAX = DX:AX
+	SHL EAX, 16
+	MOV AX, DX
+	ROR EAX, 16
+	
+	ADD EAX, GS:[elf_ph_offset]
+
+	POP BX
+	POP DX
+
+
+	; EAX = Offset in file (calc above)
+
+	; EDI = destination	
+	MOV EDI, elf_ph_entry
+	
+	PUSH ECX	
+	; ECX = size (elf_entry_size)
+	MOV CX, GS:[elf_entry_size]
+	AND ECX, 0x0000FFFF
+
+	; DX = Cluster index (at offset 0)
+	PUSH DX
+	CALL CopyFileSection
+	POP DX
+
+	POP ECX
+
+	XOR AX, AX
+FetchEntryMetadata.done:
+	POP EDI
+	POP BX
+	POP DX
+	RET
+
+
+; DX - First cluster index of file (SAVED)
+; BX - Segment for sector
+; EAX - Offset bytes in file
+; ECX - Amount of bytes
+; EDI - Destination location
+CopyFileSection:
+	PUSH BP
+CopyFileSection.offset_loop:
+	CMP EAX, GS:[bytes_per_cluster]
+	JB CopyFileSection.loop
+
+	SUB EAX, GS:[bytes_per_cluster]
+
+	; DX = FAT_TABLE[DX * 2] next cluster
+	XCHG AX, DX
+	CALL NextClusterIndex 
+	XCHG AX, DX
+
+	JMP CopyFileSection.offset_loop
+
+CopyFileSection.loop:
+	PUSH EAX
+
+	; Save cluster index
+	MOV BP, DX
+
+	; DX (cluster index) = (cluster first sector)
+	; AX (low offset) = (cluster index)
+	CALL SetClusterStartSector
+	XCHG DX, AX
+
+	POP EAX
+
+	CALL CopyFileSectionCluster
+
+	; Restore cluster index
+	MOV DX, BP
+
+	TEST ECX, ECX
+	JZ CopyFileSection.done
+
+	; Go to next cluster
+	; DX = FAT_TABLE[DX * 2] next cluster
+	XCHG AX, DX
+	CALL NextClusterIndex 
+	XCHG AX, DX
+
+	JMP CopyFileSection.loop
+
+CopyFileSection.done:
+	POP BP
+	RET
+
+
+; DX - First sector in cluster of current will-copy cluster
+; BX - Segment for sector
+; EAX - Offset bytes from cluster start (Less than bytes_per_cluster)
+; ECX - Amount of bytes (can be more than bytes_per_cluster, will be modified) 
+; EDI - Destination location
+CopyFileSectionCluster:
+	PUSH ESI
+	PUSH BP
+
+
+CopyFileSectionCluster.fix_offset:
+	; If offset >= sector size, fix it
+	CMP EAX, SECTOR_SIZE
+	JB CopyFileSectionCluster.copies_sector
+
+	; Go to next sector, and eax -= sector_size
+	SUB EAX, SECTOR_SIZE
+	INC DX
+	DEC BP
+	JZ CopyFileCluster.done
+
+	JMP CopyFileSectionCluster.fix_offset
+
+CopyFileSectionCluster.copies_sector:
+
+	CALL CopyFileSectionSector
+
+	TEST ECX, ECX
+	JZ CopyFileSectionCluster.done
+
+	INC DX
+	DEC BP
+	JNZ CopyFileSectionCluster.copies_sector
+
+CopyFileSectionCluster.done:
+	POP BP
+	POP ESI
+	RET
+
+; Copies a chunk of a sector starting at a given offset.
+; Loads 1 sector at DX into BX:0000
+; Input:
+;   ECX - Copy as much as possible from one sector (can be larger than SECTOR_SIZE, will be modified)
+;   EAX - offset will be modified (CANT be larger than SECTOR_SIZE-1, will be modified)
+;   EDI - destination address to be modified (will move forward)
+;   BX  - Usable sector (BX = segment)
+;   DX  - Sector index
+CopyFileSectionSector:
+	PUSH ESI
+	PUSH EBP
+
+	; ESI = BX << 4 (seg to addr)
+	MOV SI, BX
+	AND ESI, 0xFFFF
+	SHL ESI, 4
+
+	MOV EBP, ESI
+	ADD EBP, SECTOR_SIZE
+
+	; Add offset to ESI
+	ADD ESI, EAX 
+	XOR EAX, EAX ; EAX = 0
+
+	PUSH DX      ; Sector start low 2 byte
+	PUSH WORD 0  ; Sector start high 2 byte
+	PUSH BX      ; Segment
+	PUSH WORD 0  ; Offset
+	PUSH WORD 1  ; 1 Sector
+	CALL LoadSector
+	ADD SP, 10
+
+
+CopyFileSectionSector.loop:
+	; [ESI] = [EDI] (EAX is already 0 so can be used)
+	MOV AL, FS:[ESI]
+	MOV FS:[EDI], AL
+
+	INC ESI
+	INC EDI
+
+	CMP ESI, EBP
+	JAE CopyFileSectionSector.done
+
+	DEC ECX
+	JNZ CopyFileSectionSector.loop
+
+CopyFileSectionSector.done:
+
+	XOR EAX, EAX ; offset must be 0 after that
+
+	POP EBP
+	POP ESI
+	RET
+
+
+; ESI - Entry offset
+; EDI - Destination address
+; BX  - Sector that filedata  in
+UnrealCopyFile:
+	PUSH ECX
+	
+	MOV ECX, FS:[ESI + 0x1C]   ; ECX = size
+	MOV DX , FS:[ESI + 0x1A]   ; Load first cluster address
+
+UnrealCopyFile.loop:
+
+	; AX = FAT_DATA + DX * 2
+	CALL SetClusterStartSector
+
+	CMP ECX, GS:[bytes_per_cluster]
+	JB UnrealCopyFile.final_chunk
+
+	PUSH ECX
+	MOV ECX, GS:[bytes_per_cluster]
+	CALL UnrealCopyFileCluster
+	POP ECX
+
+	SUB ECX, GS:[bytes_per_cluster]
+
+	; DX(index) = FAT_LINKED_LIST[DX*2]
+	MOV AX, DX
+	CALL NextClusterIndex
+	MOV DX, AX
+
+	; Invalid file (shouldn't get here)
+	CMP AX, 0xFFF8
+	JAE Abort
+
+	JMP UnrealCopyFile.loop
+
+
+UnrealCopyFile.final_chunk:
+	TEST ECX, ECX
+	JZ UnrealCopyFile.done
+
+	CALL UnrealCopyFileCluster
+UnrealCopyFile.done:
+	POP ECX
+	RET
+
+
+;  ECX - Amount of bytes need to be copied
+;  AX  - Start sector (will  be modified)
+;  BX  - Memory segment sector 
+;  EDI - Place to copy into (will advance)
+UnrealCopyFileCluster:
+	PUSH BX
+	PUSH ESI
+
+UnrealCopyFileCluster.loop:
+	; ESI = BX << 4 (seg to addr)
+	MOV SI, BX
+	AND ESI, 0xFFFF
+	SHL ESI, 4
+
+	PUSH AX      ; Sector start low 2 byte
+	PUSH WORD 0  ; Sector start high 2 byte
+	PUSH BX      ; Segment
+	PUSH WORD 0  ; Offset
+	PUSH WORD 1  ; 1 Sector
+	CALL LoadSector
+	ADD SP, 10
+
+	; Less than SECTOR_SIZE
+	CMP ECX, SECTOR_SIZE
+	JB UnrealCopyFileCluster.last_chunk
+
+	; Copy SECTOR_SIZE bytes
+	PUSH ECX
+	MOV ECX, SECTOR_SIZE
+	CALL UnrealCopyFileSector
+	POP ECX
+
+	SUB ECX, SECTOR_SIZE
+	
+	; Next sector
+	INC AX
+
+	JMP UnrealCopyFileCluster.loop
+
+UnrealCopyFileCluster.last_chunk:
+	TEST ECX, ECX
+	JZ UnrealCopyFileCluster.done
+
+	CALL UnrealCopyFileSector
+
+UnrealCopyFileCluster.done:
+	POP ESI
+	POP BX
+	RET
+
+
+; Inputs:
+;  ESI - Place to copy from 
+;  EDI - Place to copy into
+;  ECX - Amount of bytes need to be copied
+UnrealCopyFileSector:
+	PUSH AX
+
+UnrealCopyFileSector.loop:
+	MOV AL, FS:[ESI]
+	MOV FS:[EDI], AL
+	
+	INC ESI
+	INC EDI
+	
+	DEC ECX	
+	JNZ UnrealCopyFileSector.loop
+
+UnrealCopyFileSector.done:
+	POP AX
+	RET
 
 
 
@@ -373,7 +872,7 @@ CopyFileSector.skip_seg_bump:
 	DEC ECX	
 	JNZ CopyFileSector.loop
 
-CopyFileSector.end:
+CopyFileSector.done:
 	POP AX
 	RET
 
@@ -405,7 +904,6 @@ SetupUnrealMode.protected_mode:
 	
 	; Select second data segment (2 * 8 = 0x10)
 	MOV BX, 0x10     
-	MOV GS, BX
 	MOV FS, BX
 
 	; Disable protected mode (bit 0 in CR0)
@@ -543,7 +1041,7 @@ PrintFile.lastChunk:
     CALL PrintAmountCharacter
     POP CX
 
-PrintFile.end:
+PrintFile.done:
     POP ES
     POP DI
     POP DX
@@ -684,7 +1182,7 @@ FindFileFromDirSector.loop:
 	; Get from DX (Cluster index) the start sector
 	CALL SetClusterStartSector
 
-	MOV CX, [max_dir_entries_per_cluster]
+	MOV CX, GS:[max_dir_entries_per_cluster]
 	CALL IterateDirectorySectors
 
 	TEST AX, AX
@@ -912,7 +1410,7 @@ ConsumeSubdirSegment:
 	MOV CX, FILENAME_SIZE
 	MOV DI, dummy_filename
 ConsumeSubdirSegment.copy_loop_start:
-	LODSB            ; Load AL from [SI], SI++
+	LODSB            ; Load AL from DS:[SI], SI++
 	CMP AL, 0        ; null terminator
 	JZ ConsumeSubdirSegment.fill_loop
 	CMP AL, '/'      ; slash (next part so stop)
@@ -921,11 +1419,11 @@ ConsumeSubdirSegment.copy_loop_start:
 	JZ ConsumeSubdirSegment.prepare_extension
 
 ConsumeSubdirSegment.copy_loop_iterate:
-	STOSB         ; Copy AL into [DI]
+	STOSB         ; Copy AL into ES:[DI]
 
 
 	LOOP ConsumeSubdirSegment.copy_loop_start
-	JMP ConsumeSubdirSegment.end
+	JMP ConsumeSubdirSegment.done
 
 ConsumeSubdirSegment.prepare_extension:
 	MOV AL, ' '
@@ -944,9 +1442,9 @@ ConsumeSubdirSegment.fill_loop:
 	MOV AL, ' '
 	REP STOSB     
 
-	JMP ConsumeSubdirSegment.end
+	JMP ConsumeSubdirSegment.done
 
-ConsumeSubdirSegment.end:
+ConsumeSubdirSegment.done:
 	POP ES
 	POP DS
 	POP AX
@@ -959,7 +1457,7 @@ global ParseFATLinkedTable
 ParseFATLinkedTable:
 	PUSH AX
 	; partition sector index
-	MOV AX, [fat_start_sector]
+	MOV AX, GS:[fat_start_sector]
 	PUSH AX          ; LBA low 
 	PUSH WORD 0x0000 ; LBA high
 	; segment:offset
@@ -1269,8 +1767,8 @@ StrCmpSize.loop:
     CMP CX, 0
     JE StrCmpSize.equal
 
-    LODSB              ; AL <- [DS:SI], SI++
-    SCASB              ; compare AL to [ES:DI], DI++
+    LODSB              ; AL <- DS:[SI], SI++
+    SCASB              ; compare AL to ES:[DI], DI++
     JNZ StrCmpSize.diff
 
     DEC CX
@@ -1281,7 +1779,7 @@ StrCmpSize.equal:
     JMP StrCmpSize.done
 
 StrCmpSize.diff:
-    ; AL = [SI - 1], BL = [DI - 1]
+    ; AL = DS:[SI - 1], BL = ES:[DI - 1]
     MOV AL, DS:[SI - 1]
     MOV BL, ES:[DI - 1]
     SUB AL, BL
@@ -1306,7 +1804,7 @@ PrintCharacter:	                    ;Assume that ASCII value is in register AL
 
 	INT 0x10	                    ;Call video interrupt
 
-PrintCharacter.end:
+PrintCharacter.done:
 	POP BX
 	POP AX
 	
@@ -1320,7 +1818,7 @@ PrintString:
 	PUSH SI
 	PUSH AX
 PrintString.next_character:	        ;Label 
-	MOV AL, [SI]	                    ;Get a byte from string into AL register
+	MOV AL, DS:[SI]	                    ;Get a byte from string into AL register
 	INC SI		                        ;Increment pointer
 	OR AL, AL	                        ;Check if AL is zero (null terminator)
 	JZ PrintString.exit_function        ;Stop if null terminator
@@ -1348,7 +1846,7 @@ disk_addr_packet:
 	DW 0,0,0,0         ; Empty 8 bytes for the LBA address 
 
 kernel_elf_path db 'BOOT/HATCH/KERNEL.ELF', 0 
-stage3_bin_path db 'BOOT/HATCH/STAGE3.BIN', 0 
+stage3_bin_path db 'BOOT/HATCH/STAGE3.ELF', 0 
 
 dummy_filename db FILENAME_SIZE DUP (0x20), 0
  
@@ -1365,6 +1863,13 @@ max_root_entries dw 0
 max_dir_entries_per_cluster dw 0
 root_dirs_amount: dw 0
 total_sectors: DD 0
+
+elf_entry_size: DW 0
+elf_entry_amount: DW 0
+elf_entry_index: DW 0 ; max elf program eentry
+elf_ph_offset: DD 0
+elf_ph_entry: DB 0x38 DUP (0x01) ; max elf program entry
+elf_is_32bit: DB 0 ; max elf program eentry
 
 partition_addr: DW 0x0000
 abort_str: DB "Abort", 0

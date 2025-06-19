@@ -8,7 +8,7 @@ CFLAGS64 := -m64 -ffreestanding -O2 -Wall -Wextra
 LDFLAGS := -nostdlib -T $(ARCH_DIR)/linker.ld
 
 HATCH_DIR := $(BOOT_DIR)/boot/Hatch
-KERNEL_OUT := $(HATCH_DIR)/kernel.elf
+KERNEL_ELF_OUT := $(HATCH_DIR)/kernel.elf
 
 all: build
 	
@@ -24,7 +24,7 @@ build:
 	$(CC64) $(CFLAGS64) -c $(CORE_DIR)/kernel.c -o $(BUILD_DIR)/kernel.o
 
 	# Link final kernel ELF
-	$(LD) $(LDFLAGS) -o $(KERNEL_OUT) \
+	$(LD) $(LDFLAGS) -o $(KERNEL_ELF_OUT) \
 		$(BUILD_DIR)/boot_entry.o \
 		$(BUILD_DIR)/boot_setup.o \
 		$(BUILD_DIR)/kernel.o

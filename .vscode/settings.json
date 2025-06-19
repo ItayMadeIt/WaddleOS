@@ -1,6 +1,8 @@
 {
     "files.associations": {
         "*.embeddedhtml": "html",
-        "stdint.h": "c"
+        "stdint.h": "c",
+        "stage3_mem.h": "c",
+        "stage3_paging.h": "c"
     }
 }
