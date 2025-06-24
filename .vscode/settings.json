@@ -3,6 +3,11 @@
         "*.embeddedhtml": "html",
         "stdint.h": "c",
         "stage3_mem.h": "c",
-        "stage3_paging.h": "c"
+        "stage3_paging.h": "c",
+        "stage3_core.h": "c",
+        "stage3_idt.h": "c",
+        "stage3_gdt.h": "c",
+        "stdbool.h": "c",
+        "stage3_debug.h": "c"
     }
 }

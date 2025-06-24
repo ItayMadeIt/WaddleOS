@@ -3,9 +3,9 @@
 ARCH_DIR := arch/x86_64
 CORE_DIR := core
 
-CFLAGS64 := -m64 -ffreestanding -O2 -Wall -Wextra
+CFLAGS64 := -m64 -ffreestanding -O2 -Wall -Wextra -g -mcmodel=kernel
 
-LDFLAGS := -nostdlib -T $(ARCH_DIR)/linker.ld
+LDFLAGS := -nostdlib -z max-page-size=0x1000 -T $(ARCH_DIR)/linker.ld
 
 HATCH_DIR := $(BOOT_DIR)/boot/Hatch
 KERNEL_ELF_OUT := $(HATCH_DIR)/kernel.elf
@@ -21,16 +21,19 @@ build:
 
 	# Compile 64-bit setup C code and kernel
 	$(CC64) $(CFLAGS64) -c $(ARCH_DIR)/setup/boot_setup.c -o $(BUILD_DIR)/boot_setup.o
+	$(CC64) $(CFLAGS64) -c $(ARCH_DIR)/setup/boot_debug.c -o $(BUILD_DIR)/boot_debug.o
 	$(CC64) $(CFLAGS64) -c $(CORE_DIR)/kernel.c -o $(BUILD_DIR)/kernel.o
 
 	# Link final kernel ELF
 	$(LD) $(LDFLAGS) -o $(KERNEL_ELF_OUT) \
 		$(BUILD_DIR)/boot_entry.o \
 		$(BUILD_DIR)/boot_setup.o \
+		$(BUILD_DIR)/boot_debug.o \
 		$(BUILD_DIR)/kernel.o
 	
 	rm -r $(BUILD_DIR)/boot_entry.o
 	rm -r $(BUILD_DIR)/boot_setup.o
+	rm -r $(BUILD_DIR)/boot_debug.o
 	rm -r $(BUILD_DIR)/kernel.o
 
 debug: 

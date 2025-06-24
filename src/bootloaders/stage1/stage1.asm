@@ -29,6 +29,11 @@ _start:
 	MOV GS, AX
 	MOV SS, AX
 
+	; Tell the BIOS that this will use long mode
+	MOV EAX, 0xEC00 ; BIOS mode notification
+	MOV BL,  0x0002 ; Long mode
+	INT 0x15
+
 	; Save driver
 	MOV BYTE [driver], DL
 

@@ -1,11 +1,11 @@
 
 #include <stdint.h>
 
-extern void entry64();
+void printf(const char* fmt, ...);
 
 void boot_main()
 {
-    while (1);
+    printf("Gdt Uses Null Number, Yikes...");
 
-    return;
+    while (1);
 }

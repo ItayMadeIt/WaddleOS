@@ -3,17 +3,16 @@
 all: build
 
 
-STAGE3_C_FILES   := stage3_paging.c stage3_mem.c stage3_main.c
+STAGE3_C_FILES   := stage3_paging.c stage3_idt.c stage3_debug.c stage3_gdt.c stage3_main.c
 STAGE3_C_SOURCES := $(addprefix stage3/, $(STAGE3_C_FILES))
 STAGE3_C_INCLUDE := include
 
-STAGE3_AS_FILES  := stage3_entry.asm
+STAGE3_AS_FILES  := stage3_entry.asm stage3_asm_utils.asm
 STAGE3_AS_SOURCES := $(addprefix stage3/, $(STAGE3_AS_FILES))
 
 STAGE3_OBJ_FILES := $(addprefix $(BUILD_DIR)/, $(STAGE3_C_FILES:.c=.o) $(STAGE3_AS_FILES:.asm=.o))
 
-CFLAGS_STAGE3 := -m32 -ffreestanding -nostdlib -fno-pic -fno-pie -fno-stack-protector -Wall -Wextra -O0 \
-                 -fno-inline -fno-optimize-sibling-calls -fno-toplevel-reorder -g -ggdb3 -I$(STAGE3_C_INCLUDE)
+CFLAGS_STAGE3 := -m32 -ffreestanding -nostdlib -fno-pic -fno-pie -fno-stack-protector -Wall -Wextra -O2 -g -I$(STAGE3_C_INCLUDE)
 LDFLAGS_STAGE3 := -m elf_i386 -nostdlib
 
 HATCH_DIR := $(BOOT_DIR)/boot/Hatch

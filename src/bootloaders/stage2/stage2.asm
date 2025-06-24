@@ -426,7 +426,7 @@ CopyFileSectionCluster.fix_offset:
 	SUB EAX, SECTOR_SIZE
 	INC DX
 	DEC BP
-	JZ CopyFileCluster.done
+	JZ CopyFileSectionCluster.done
 
 	JMP CopyFileSectionCluster.fix_offset
 
@@ -500,126 +500,6 @@ CopyFileSectionSector.done:
 	POP EBP
 	POP ESI
 	RET
-
-
-; ESI - Entry offset
-; EDI - Destination address
-; BX  - Sector that filedata  in
-UnrealCopyFile:
-	PUSH ECX
-	
-	MOV ECX, FS:[ESI + 0x1C]   ; ECX = size
-	MOV DX , FS:[ESI + 0x1A]   ; Load first cluster address
-
-UnrealCopyFile.loop:
-
-	; AX = FAT_DATA + DX * 2
-	CALL SetClusterStartSector
-
-	CMP ECX, GS:[bytes_per_cluster]
-	JB UnrealCopyFile.final_chunk
-
-	PUSH ECX
-	MOV ECX, GS:[bytes_per_cluster]
-	CALL UnrealCopyFileCluster
-	POP ECX
-
-	SUB ECX, GS:[bytes_per_cluster]
-
-	; DX(index) = FAT_LINKED_LIST[DX*2]
-	MOV AX, DX
-	CALL NextClusterIndex
-	MOV DX, AX
-
-	; Invalid file (shouldn't get here)
-	CMP AX, 0xFFF8
-	JAE Abort
-
-	JMP UnrealCopyFile.loop
-
-
-UnrealCopyFile.final_chunk:
-	TEST ECX, ECX
-	JZ UnrealCopyFile.done
-
-	CALL UnrealCopyFileCluster
-UnrealCopyFile.done:
-	POP ECX
-	RET
-
-
-;  ECX - Amount of bytes need to be copied
-;  AX  - Start sector (will  be modified)
-;  BX  - Memory segment sector 
-;  EDI - Place to copy into (will advance)
-UnrealCopyFileCluster:
-	PUSH BX
-	PUSH ESI
-
-UnrealCopyFileCluster.loop:
-	; ESI = BX << 4 (seg to addr)
-	MOV SI, BX
-	AND ESI, 0xFFFF
-	SHL ESI, 4
-
-	PUSH AX      ; Sector start low 2 byte
-	PUSH WORD 0  ; Sector start high 2 byte
-	PUSH BX      ; Segment
-	PUSH WORD 0  ; Offset
-	PUSH WORD 1  ; 1 Sector
-	CALL LoadSector
-	ADD SP, 10
-
-	; Less than SECTOR_SIZE
-	CMP ECX, SECTOR_SIZE
-	JB UnrealCopyFileCluster.last_chunk
-
-	; Copy SECTOR_SIZE bytes
-	PUSH ECX
-	MOV ECX, SECTOR_SIZE
-	CALL UnrealCopyFileSector
-	POP ECX
-
-	SUB ECX, SECTOR_SIZE
-	
-	; Next sector
-	INC AX
-
-	JMP UnrealCopyFileCluster.loop
-
-UnrealCopyFileCluster.last_chunk:
-	TEST ECX, ECX
-	JZ UnrealCopyFileCluster.done
-
-	CALL UnrealCopyFileSector
-
-UnrealCopyFileCluster.done:
-	POP ESI
-	POP BX
-	RET
-
-
-; Inputs:
-;  ESI - Place to copy from 
-;  EDI - Place to copy into
-;  ECX - Amount of bytes need to be copied
-UnrealCopyFileSector:
-	PUSH AX
-
-UnrealCopyFileSector.loop:
-	MOV AL, FS:[ESI]
-	MOV FS:[EDI], AL
-	
-	INC ESI
-	INC EDI
-	
-	DEC ECX	
-	JNZ UnrealCopyFileSector.loop
-
-UnrealCopyFileSector.done:
-	POP AX
-	RET
-
 
 
 
@@ -743,140 +623,6 @@ ContinueWithProtectedMode.protected_mode:
 
 
 
-; BX - Usable memory sector
-; ES:DI - Destination address
-; DS:SI - Entry start
-CopyFile:
-	PUSH ECX
-	PUSH AX
-	PUSH DX
-
-	MOV ECX, DS:[SI + 0x1C]   ; ECX = size
-	MOV DX , DS:[SI + 0x1A]   ; Load first cluster address
-
-CopyFile.loop:
-	; AX = FAT_DATA + DX * 2
-	CALL SetClusterStartSector
-
-	CMP ECX, GS:[bytes_per_cluster]
-	JB CopyFile.final_chunk
-
-	PUSH ECX
-	MOV ECX, GS:[bytes_per_cluster]
-	CALL CopyFileCluster
-	POP ECX
-
-	SUB ECX, GS:[bytes_per_cluster]
-
-	; DX(index) = FAT_LINKED_LIST[DX*2]
-	MOV AX, DX
-	CALL NextClusterIndex
-	MOV DX, AX
-
-	; Invalid file (shouldn't get here)
-	CMP AX, 0xFFF8
-	JAE Abort
-
-	JMP CopyFile.loop
-
-
-CopyFile.final_chunk:
-	TEST ECX, ECX
-	JZ CopyFile.done
-
-	CALL CopyFileCluster
-
-CopyFile.done:
-	POP DX
-	POP AX
-	POP ECX
-	RET
-
-
-; Inputs:
-;  ES:DI - Place to copy into
-;  ECX - Amount of bytes need to be copied
-;  AX  - Start sector 
-;  BX  - Memory segment sector 
-; 
-; Notes:
-;  ES:DI & DS:SI move forward min(ECX, bytes_per_cluster)
-;
-CopyFileCluster:
-	PUSH BX
-
-	MOV DS, BX
-
-CopyFileCluster.loop:
-	XOR SI, SI
-
-	PUSH AX      ; Sector start low 2 byte
-	PUSH WORD 0  ; Sector start high 2 byte
-	PUSH BX      ; Segment
-	PUSH WORD 0  ; Offset
-	PUSH WORD 1  ; 1 Sector
-	CALL LoadSector
-	ADD SP, 10
-
-	CMP ECX, SECTOR_SIZE
-	JB CopyFileCluster.last_chunk
-
-	PUSH ECX
-	PUSH SI
-	PUSH DS
-	MOV ECX, SECTOR_SIZE
-	CALL CopyFileSector
-	POP DS
-	POP SI
-	POP ECX
-
-	SUB ECX, SECTOR_SIZE
-
-	INC AX
-
-	JMP CopyFileCluster.loop
-
-CopyFileCluster.last_chunk:
-	TEST ECX, ECX
-	JZ CopyFileCluster.done
-
-	CALL CopyFileSector
-
-CopyFileCluster.done:
-	POP BX
-	RET
-
-
-;
-; Inputs:
-;  DS:SI - Place to copy from 
-;  ES:DI - Place to copy into
-;  ECX - Amount of bytes need to be copied
-CopyFileSector:
-	PUSH AX
-
-CopyFileSector.loop:
-	MOV AL, DS:[SI]
-	MOV ES:[DI], AL
-	
-	INC SI
-	INC DI
-	JNZ CopyFileSector.skip_seg_bump
-	
-	MOV AX, ES
-	ADD AX, 0x100
-	MOV ES, AX
-	
-CopyFileSector.skip_seg_bump:
-	
-	DEC ECX	
-	JNZ CopyFileSector.loop
-
-CopyFileSector.done:
-	POP AX
-	RET
-
-
 SetupUnrealMode:
 	PUSH SS
 	PUSH DS
@@ -951,7 +697,6 @@ protected_gdt_flatcode:
 protected_gdt_flatdata: 
 	dq  0x00CF92000000FFFF
 protected_gdt_end:
-
 
 protected_gdt_info:
    dw protected_gdt_end - protected_gdt_begin - 1   ; last byte in table
@@ -1540,7 +1285,6 @@ ParseFATPartitionSector.parse:
 
 	RET
 
-	
 
 global LoadSector
 ; Loads a sector into the segment:offset provided

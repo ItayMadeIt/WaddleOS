@@ -1,7 +1,5 @@
 #include <stdint.h>
 
-volatile int a[1000];
-
 void kernel_main() 
 {
     volatile char* vga = (volatile char*)0xB8000;
